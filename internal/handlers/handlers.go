@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,18 +28,69 @@ func ToDoHandler(w http.ResponseWriter, r *http.Request){
 	}
 }
 
-
-
-
-func GetToDoById(w http.ResponseWriter, r *http.Request){
-	if r.Method != "GET" {
-		http.Error(w, "Nur Get Methode erlaubt", http.StatusMethodNotAllowed)
-		return
+func ToDoParameterHandler(w http.ResponseWriter, r *http.Request){
+	switch r.Method{
+	case http.MethodGet:
+		GetToDoById(w, r)	// GET /todo/{id}: Abrufen eines spezifischen ToDo-Eintrags.
+	case http.MethodPatch:
+		PatchToDoById(w, r)	// PATCH /todo/{id}: Aktualisieren eines ToDo-Eintrags.
 	}
-
 }
 
 
+func PatchToDoById(w http.ResponseWriter, r *http.Request){
+	// Parameter Id auslesen und prüfen
+	todoID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/todo/"), 10, 0)
+	if err != nil{
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Umwandeln in neue Todo Instanz
+	var updatedToDo models.ToDo
+	err = json.NewDecoder(r.Body).Decode(&updatedToDo)
+	if err != nil{
+		http.Error(w, "Request Body konnte nicht decoded werden", http.StatusBadRequest)
+	}
+
+	_, err = database.Connection.Exec("UPDATE todos SET title = ?, description = ?, category = ?, `order` = ?, updated_at = ?, completed = ? WHERE id = ?",
+        updatedToDo.Title, updatedToDo.Description, updatedToDo.Category, updatedToDo.Order, time.Now(), updatedToDo.Completed, todoID)
+	if err != nil{
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)		// senden von Statuscode an den Client
+	json.NewEncoder(w).Encode(struct {  // senden von einer Bestätigung an den Client	
+        Message string `json:"message"`
+    }{
+        Message: "ToDo erfolgreich aktualisiert",
+    })
+}
+
+func GetToDoById(w http.ResponseWriter, r *http.Request){
+	// Parameter Id auslesen und prüfen
+	todoID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/todo/"), 10, 0)
+	if err != nil{
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var todo models.ToDo
+	err = database.Connection.QueryRow("SELECT id, user_id, title, description, category, `order`, created_at, updated_at, completed FROM todos WHERE id = ?", todoID).Scan(&todo.ID, &todo.UserID, &todo.Title, &todo.Description, &todo.Category, &todo.Order, &todo.CreatedAt, &todo.UpdatedAt, &todo.Completed)
+	if err != nil{
+		if err == sql.ErrNoRows{
+			http.Error(w, "ToDo nicht gefunden", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)		// senden von Statuscode an den Client
+	json.NewEncoder(w).Encode(todo)  	// senden von der erstellten ToDo an den Client
+}
 
 func GetTodosByUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
@@ -46,7 +99,7 @@ func GetTodosByUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parameter UserID auslesen und prüfen
-	userID := strings.TrimPrefix(r.URL.Path, "/todos/user/")
+	userID := strings.TrimPrefix(r.URL.Path, "/todo/user/")
 	if userID == "" {
 		http.Error(w, "UserID fehlt", http.StatusBadRequest)
 		return
@@ -55,7 +108,7 @@ func GetTodosByUser(w http.ResponseWriter, r *http.Request) {
 	// Select per SQL Befehl an Datenbank
 	result, err := database.Connection.Query("SELECT id, user_id, title, description, category, `order`, created_at, updated_at, completed FROM todos WHERE user_id = ?", userID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer result.Close()
@@ -76,18 +129,6 @@ func GetTodosByUser(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)		// senden von Statuscode an den Client
 	json.NewEncoder(w).Encode(todos)  	// senden von der erstellten ToDo an den Client
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 func createTodo(w http.ResponseWriter, r *http.Request) {
 
