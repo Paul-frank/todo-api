@@ -14,8 +14,14 @@ func main(){
     defer db.Close() // Beenden der Datenbankinstanz
 
     handlers.SetDatabase(db) // Setze die Datenbankinstanz in den Handlers
+    
+	
+	http.HandleFunc("/todo", handlers.ToDoHandler)
+	http.HandleFunc("/todo/", handlers.GetToDoById)         		//* GET /todos/{userID}: Abrufen eines spezifischen ToDo-Eintrags. 			
+	http.HandleFunc("/todo/user/", handlers.GetTodosByUser) 	//* GET /todo/user/{ID}: Abrufen aller ToDo-Einträge des angemeldeten Benutzers
 
-    http.HandleFunc("/createTodo", handlers.CreateToDoHandler) //* POST /createTodo: Erstellen eines neuen ToDo-Eintrags
+
+
 
     log.Println("Server startet auf :8080")
     log.Fatal(http.ListenAndServe(":8080", nil))
@@ -23,9 +29,12 @@ func main(){
 
 /*
 ToDo:
-	POST /todos: Erstellen eines neuen ToDo-Eintrags.
+	- Request http://localhost:8080/todos/user/1/... gibt Statuscode 200 -> soll nicht sein
 
-	GET /todos: Abrufen aller ToDo-Einträge des angemeldeten Benutzers.
+	//GET /todos/user/{ID}: Abrufen aller ToDo-Einträge des angemeldeten Benutzers.
+	//POST /todo: Erstellen eines neuen ToDo-Eintrags.
+
+	
 	GET /todos/{id}: Abrufen eines spezifischen ToDo-Eintrags.
 	PUT /todos/{id}: Aktualisieren eines ToDo-Eintrags.
 	DELETE /todos/{id}: Löschen eines ToDo-Eintrags.
