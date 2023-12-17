@@ -53,8 +53,44 @@ func PatchToDoById(w http.ResponseWriter, r *http.Request){
 		http.Error(w, "Request Body konnte nicht decoded werden", http.StatusBadRequest)
 	}
 
-	_, err = database.Connection.Exec("UPDATE todos SET title = ?, description = ?, category = ?, `order` = ?, updated_at = ?, completed = ? WHERE id = ?",
-        updatedToDo.Title, updatedToDo.Description, updatedToDo.Category, updatedToDo.Order, time.Now(), updatedToDo.Completed, todoID)
+	// Bilden des SQL Strings
+	args := []interface{}{} 		// -> Slice vom Typ Interface um Argumente der unterschiedlichen Typen aufzunehmen
+	query := "UPDATE todos SET "	// -> SQL Execution String
+
+	if updatedToDo.Title != ""{
+		query += "title = ?, "
+		args = append(args, updatedToDo.Title)
+	}
+	if updatedToDo.Description != ""{
+		query += "description = ?, "
+		args = append(args, updatedToDo.Description)
+	}
+	if updatedToDo.Category != ""{
+		query += "category = ?, "
+		args = append(args, updatedToDo.Category)
+	}
+	if updatedToDo.Order != 0{ //! Sonderfall -> die Reihenfolge der anderen Todos muss agepasst werde
+		query += "order = ?, "
+		args = append(args, updatedToDo.Order)
+	}
+	if updatedToDo.Completed {
+    	query += "completed = ?, "
+    	args = append(args, updatedToDo.Completed)
+	}
+
+	if len(args) > 0{
+		query += "updated_at = ?"
+		args = append(args, time.Now())
+
+	} else {
+		http.Error(w, "Keine gültigen Parameter im Request Body", http.StatusBadRequest)
+		return
+	}
+
+	query += " WHERE id = ?"
+	args = append(args, todoID)
+
+	_, err = database.Connection.Exec(query, args...)
 	if err != nil{
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
