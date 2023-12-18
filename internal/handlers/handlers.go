@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -25,7 +26,15 @@ func ToDoHandler(w http.ResponseWriter, r *http.Request){
 	switch r.Method{
 	case http.MethodPost:
 		createTodo(w, r) 	// POST /todo: Erstellen eines neuen ToDo-Eintrags
-	}
+	default:
+        w.Header().Set("Content-Type", "application/json") // Senden einer Fehlermeldung, wenn eine nicht unterstützte Methode verwendet wird
+        w.WriteHeader(http.StatusMethodNotAllowed)
+        json.NewEncoder(w).Encode(struct {
+            Error string `json:"error"`
+        }{
+            Error: "Nicht unterstützte Methode",
+        })
+    }
 }
 
 func ToDoParameterHandler(w http.ResponseWriter, r *http.Request){
@@ -34,7 +43,15 @@ func ToDoParameterHandler(w http.ResponseWriter, r *http.Request){
 		GetToDoById(w, r)	// GET /todo/{id}: Abrufen eines spezifischen ToDo-Eintrags.
 	case http.MethodPatch:
 		PatchToDoById(w, r)	// PATCH /todo/{id}: Aktualisieren eines ToDo-Eintrags.
-	}
+	default:
+        w.Header().Set("Content-Type", "application/json") // Senden einer Fehlermeldung, wenn eine nicht unterstützte Methode verwendet wird
+        w.WriteHeader(http.StatusMethodNotAllowed)
+        json.NewEncoder(w).Encode(struct {
+            Error string `json:"error"`
+        }{
+            Error: "Nicht unterstützte Methode",
+        })
+    }
 }
 
 
@@ -70,8 +87,13 @@ func PatchToDoById(w http.ResponseWriter, r *http.Request){
 		args = append(args, updatedToDo.Category)
 	}
 	if updatedToDo.Order != 0{ //! Sonderfall -> die Reihenfolge der anderen Todos muss agepasst werde
-		query += "order = ?, "
+		query += "`order` = ?, "
 		args = append(args, updatedToDo.Order)
+		err := updateOrder(todoID, updatedToDo.Order)
+		if err != nil{
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+		}
 	}
 	if updatedToDo.Completed {
     	query += "completed = ?, "
@@ -234,4 +256,40 @@ func createTodo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)	// senden von Statuscode an den Client
 	json.NewEncoder(w).Encode(newToDo)  // senden von der erstellten ToDo an den Client
+}
+
+func updateOrder(todoID int64, newOrder int) error{
+	var currentOrder,userID, maxOrder int
+
+	// Abrufen der aktuellen Position (order) und der UserID
+	err := database.Connection.QueryRow("SELECT `order`, user_id FROM todos WHERE id = ?", todoID).Scan(&currentOrder, &userID)
+	if err != nil{
+		return err
+	}
+
+	// Abrufen der maximalen Postion (order)
+	err = database.Connection.QueryRow("SELECT MAX(`order`) FROM todos WHERE user_id = ?", userID).Scan(&maxOrder)
+    if err != nil {
+        return err
+    }
+
+	// Überprüfen ob die neue Position im Bereich der gültigen Werte liegt
+	if newOrder > maxOrder {
+        return errors.New("Die neue Order ist größer als die maximale erlaubte Order")
+    }
+
+	// Anpassen der Position (order) der anderen ToDos
+	if newOrder > currentOrder {
+		_, err = database.Connection.Exec("UPDATE todos SET `order` = `order` - 1 WHERE `order` > ? AND `order` <= ? AND user_id = ?", currentOrder, newOrder, userID)
+	} else if newOrder < currentOrder {
+		_, err = database.Connection.Exec("UPDATE todos SET `order` = `order` + 1 WHERE `order` >= ? AND `order` < ? AND user_id = ?", newOrder, currentOrder, userID)
+	} else {
+		err = errors.New("Die ToDo hat bereits diese Position")
+	}
+	
+	if err != nil{
+		return err
+	}
+
+	return nil
 }

@@ -29,7 +29,9 @@ func main(){
 
 /*
 ToDo:
+	- Exceptions sind nicht als Json formatiert!
 	- Request http://localhost:8080/todos/user/1/100... gibt Statuscode 200 -> soll nicht sein
+	- Request http://localhost:8080/todos/100... gibt Statuscode 200 -> soll nicht sein
 
 	//GET /todo/user/{ID}: Abrufen aller ToDo-Einträge des angemeldeten Benutzers.
 	//POST /todo: Erstellen eines neuen ToDo-Eintrags.
