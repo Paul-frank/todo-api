@@ -3,7 +3,6 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	db "github.com/Paul-frank/todo-api/internal/database"
 	"github.com/Paul-frank/todo-api/internal/models"
 )
+
 
 var database *db.Database // globaler DB-Pointer
 
@@ -40,9 +40,11 @@ func ToDoHandler(w http.ResponseWriter, r *http.Request){
 func ToDoParameterHandler(w http.ResponseWriter, r *http.Request){
 	switch r.Method{
 	case http.MethodGet:
-		GetToDoById(w, r)	// GET /todo/{id}: Abrufen eines spezifischen ToDo-Eintrags.
+		getToDoById(w, r)	// GET /todo/{id}: Abrufen eines spezifischen ToDo-Eintrags.
 	case http.MethodPatch:
-		PatchToDoById(w, r)	// PATCH /todo/{id}: Aktualisieren eines ToDo-Eintrags.
+		patchToDoById(w, r)	// PATCH /todo/{id}: Aktualisieren eines ToDo-Eintrags.
+	case http.MethodDelete:
+		deleteToDoById(w,r) // DELETE /todo/{id}: löschen eines ToDo-Eintrags.
 	default:
         w.Header().Set("Content-Type", "application/json") // Senden einer Fehlermeldung, wenn eine nicht unterstützte Methode verwendet wird
         w.WriteHeader(http.StatusMethodNotAllowed)
@@ -54,12 +56,12 @@ func ToDoParameterHandler(w http.ResponseWriter, r *http.Request){
     }
 }
 
+func patchToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQL Transaktionen wurden benutzt! + getestet
 
-func PatchToDoById(w http.ResponseWriter, r *http.Request){
 	// Parameter Id auslesen und prüfen
 	todoID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/todo/"), 10, 0)
 	if err != nil{
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusBadRequest, "Ungültige todo_id")
 		return
 	}
 
@@ -67,10 +69,58 @@ func PatchToDoById(w http.ResponseWriter, r *http.Request){
 	var updatedToDo models.ToDo
 	err = json.NewDecoder(r.Body).Decode(&updatedToDo)
 	if err != nil{
-		http.Error(w, "Request Body konnte nicht decoded werden", http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusBadRequest, "Request Body konnte nicht decodiert werden")
 	}
 
-	// Bilden des SQL Strings
+	// Beginn der Transaktion
+	tx, err := database.Connection.Begin()
+	if err != nil{
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Abrufen der der benötigten Daten
+	if updatedToDo.Order != 0{
+		var currentOrder,userID, maxOrder int
+		// Abrufen der aktuellen Position (order) und der UserID
+		err = tx.QueryRow("SELECT `order`, user_id FROM todos WHERE id = ?", todoID).Scan(&currentOrder, &userID)
+		if err != nil{
+			tx.Rollback()
+			sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// Abrufen der maximalen Postion (order)
+		err = tx.QueryRow("SELECT MAX(`order`) FROM todos WHERE user_id = ?", userID).Scan(&maxOrder)
+    	if err != nil {
+			tx.Rollback()
+			sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+        	return
+		}
+		// Überprüfen ob die neue Position (order) im Bereich der gültigen Werte liegt
+		if updatedToDo.Order > maxOrder {
+			tx.Rollback()
+			sendErrorResponse(w, http.StatusBadRequest, "Die neue Position ist größer als die maximal erlaubte Position")
+    	    return
+    	}
+		if updatedToDo.Order == currentOrder {
+			tx.Rollback()
+			sendErrorResponse(w, http.StatusBadRequest, "Die neue Position ist die gleiche wie die alte Position")
+        	return
+		}
+		// Anpassen der Position (order) der anderen ToDos
+		if updatedToDo.Order > currentOrder {
+			_, err = tx.Exec("UPDATE todos SET `order` = `order` - 1 WHERE `order` > ? AND `order` <= ? AND user_id = ?", currentOrder, updatedToDo.Order, userID)
+		} else if updatedToDo.Order < currentOrder {
+			_, err = tx.Exec("UPDATE todos SET `order` = `order` + 1 WHERE `order` >= ? AND `order` < ? AND user_id = ?", updatedToDo.Order, currentOrder, userID)
+		}	
+		if err != nil{
+			tx.Rollback()
+			sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+			return 
+		}
+	}
+
+	// Bilden des SQL Strings für die Aktualisierung
 	args := []interface{}{} 		// -> Slice vom Typ Interface um Argumente der unterschiedlichen Typen aufzunehmen
 	query := "UPDATE todos SET "	// -> SQL Execution String
 
@@ -86,14 +136,9 @@ func PatchToDoById(w http.ResponseWriter, r *http.Request){
 		query += "category = ?, "
 		args = append(args, updatedToDo.Category)
 	}
-	if updatedToDo.Order != 0{ //! Sonderfall -> die Reihenfolge der anderen Todos muss agepasst werde
+	if updatedToDo.Order != 0{
 		query += "`order` = ?, "
 		args = append(args, updatedToDo.Order)
-		err := updateOrder(todoID, updatedToDo.Order)
-		if err != nil{
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-		}
 	}
 	if updatedToDo.Completed {
     	query += "completed = ?, "
@@ -103,30 +148,40 @@ func PatchToDoById(w http.ResponseWriter, r *http.Request){
 	if len(args) > 0{
 		query += "updated_at = ?"
 		args = append(args, time.Now())
-
 	} else {
-		http.Error(w, "Keine gültigen Parameter im Request Body", http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusBadRequest, "Keine gültigen Parameter im Request Body")
 		return
 	}
 
 	query += " WHERE id = ?"
 	args = append(args, todoID)
 
-	_, err = database.Connection.Exec(query, args...)
+	// Ausführen des SQL Strings für die Aktualisierung
+	_, err = tx.Exec(query, args...)
 	if err != nil{
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		tx.Rollback()
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 
+	// Commit der Transaktion
+	err = tx.Commit()
+	if err != nil{
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Senden der Antwort
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)		// senden von Statuscode an den Client
-	json.NewEncoder(w).Encode(struct {  // senden von einer Bestätigung an den Client	
+	w.WriteHeader(http.StatusOK)		
+	json.NewEncoder(w).Encode(struct {	
         Message string `json:"message"`
     }{
         Message: "ToDo erfolgreich aktualisiert",
     })
 }
 
-func GetToDoById(w http.ResponseWriter, r *http.Request){
+func getToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt + getestet
 	// Parameter Id auslesen und prüfen
 	todoID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/todo/"), 10, 0)
 	if err != nil{
@@ -134,20 +189,22 @@ func GetToDoById(w http.ResponseWriter, r *http.Request){
 		return
 	}
 
+	// SQL Select Abfrage zum einlesen und Umwandeln in eine ToDo Instanz 
 	var todo models.ToDo
 	err = database.Connection.QueryRow("SELECT id, user_id, title, description, category, `order`, created_at, updated_at, completed FROM todos WHERE id = ?", todoID).Scan(&todo.ID, &todo.UserID, &todo.Title, &todo.Description, &todo.Category, &todo.Order, &todo.CreatedAt, &todo.UpdatedAt, &todo.Completed)
 	if err != nil{
 		if err == sql.ErrNoRows{
-			http.Error(w, "ToDo nicht gefunden", http.StatusBadRequest)
+			sendErrorResponse(w, http.StatusBadRequest, "Ungültige todo_id")
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		sendErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	// Senden der Antwort
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)		// senden von Statuscode an den Client
-	json.NewEncoder(w).Encode(todo)  	// senden von der erstellten ToDo an den Client
+	w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(todo)
 }
 
 func GetTodosByUser(w http.ResponseWriter, r *http.Request) {
@@ -258,38 +315,73 @@ func createTodo(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(newToDo)  // senden von der erstellten ToDo an den Client
 }
 
-func updateOrder(todoID int64, newOrder int) error{
-	var currentOrder,userID, maxOrder int
-
-	// Abrufen der aktuellen Position (order) und der UserID
-	err := database.Connection.QueryRow("SELECT `order`, user_id FROM todos WHERE id = ?", todoID).Scan(&currentOrder, &userID)
+func deleteToDoById (w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQL Transaktionen wurden benutzt! + getestet
+	// Parameter Id auslesen und prüfen
+	todoID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/todo/"), 10, 0)
 	if err != nil{
-		return err
+		sendErrorResponse(w, http.StatusBadRequest, "Ungültige todo_id")
+		return
 	}
 
-	// Abrufen der maximalen Postion (order)
-	err = database.Connection.QueryRow("SELECT MAX(`order`) FROM todos WHERE user_id = ?", userID).Scan(&maxOrder)
+	// Beginn der Transaktion
+	tx, err := database.Connection.Begin()
+	if err != nil{
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Anpassen der Position (order)
+	var currentOrder, userID int
+
+	err = tx.QueryRow("SELECT `order`, user_id FROM todos WHERE id = ?", todoID).Scan(&currentOrder, &userID) // Position (order) und userID auslesen
+	if err != nil{
+		tx.Rollback()
+		sendErrorResponse(w, http.StatusBadRequest, "todo_id nicht vorhanden")
+		return
+	}
+
+	_, err = tx.Exec("UPDATE todos SET `order` = `order` - 1 WHERE `order` > ? AND user_id = ?", currentOrder, userID) // Positionen (order) der anderen ToDos anpassen 
     if err != nil {
-        return err
+		tx.Rollback()
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+        return
     }
 
-	// Überprüfen ob die neue Position im Bereich der gültigen Werte liegt
-	if newOrder > maxOrder {
-        return errors.New("Die neue Order ist größer als die maximale erlaubte Order")
-    }
-
-	// Anpassen der Position (order) der anderen ToDos
-	if newOrder > currentOrder {
-		_, err = database.Connection.Exec("UPDATE todos SET `order` = `order` - 1 WHERE `order` > ? AND `order` <= ? AND user_id = ?", currentOrder, newOrder, userID)
-	} else if newOrder < currentOrder {
-		_, err = database.Connection.Exec("UPDATE todos SET `order` = `order` + 1 WHERE `order` >= ? AND `order` < ? AND user_id = ?", newOrder, currentOrder, userID)
-	} else {
-		err = errors.New("Die ToDo hat bereits diese Position")
-	}
-	
+	// Löschen der ToDo
+	_, err = tx.Exec("DELETE FROM todos WHERE id = ?", todoID)
 	if err != nil{
-		return err
+		tx.Rollback()
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return 
 	}
 
-	return nil
+	// Commit der Transaktion
+	err = tx.Commit()
+	if err != nil{
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Senden der Antwort
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(struct {
+        Message string `json:"message"`
+    }{
+        Message: "ToDo erfolgreich gelöscht",
+    })
+}
+
+type ErrorResponse struct{
+	Statuscode 	int		`json:"status_code"`
+	Error 		string	`json:"error"`
+}
+
+func sendErrorResponse (w http.ResponseWriter, statusCode int, errorMessage string){
+	w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(statusCode)
+    json.NewEncoder(w).Encode(ErrorResponse{
+		Statuscode: statusCode,
+		Error: errorMessage,
+	})
 }
