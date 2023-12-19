@@ -27,13 +27,7 @@ func ToDoHandler(w http.ResponseWriter, r *http.Request){
 	case http.MethodPost:
 		createTodo(w, r) 	// POST /todo: Erstellen eines neuen ToDo-Eintrags
 	default:
-        w.Header().Set("Content-Type", "application/json") // Senden einer Fehlermeldung, wenn eine nicht unterstützte Methode verwendet wird
-        w.WriteHeader(http.StatusMethodNotAllowed)
-        json.NewEncoder(w).Encode(struct {
-            Error string `json:"error"`
-        }{
-            Error: "Nicht unterstützte Methode",
-        })
+		sendErrorResponse(w, http.StatusBadRequest, "Nicht unterstützte Methode") // Senden einer Fehlermeldung, wenn eine nicht unterstützte Methode verwendet wird
     }
 }
 
@@ -46,13 +40,7 @@ func ToDoParameterHandler(w http.ResponseWriter, r *http.Request){
 	case http.MethodDelete:
 		deleteToDoById(w,r) // DELETE /todo/{id}: löschen eines ToDo-Eintrags.
 	default:
-        w.Header().Set("Content-Type", "application/json") // Senden einer Fehlermeldung, wenn eine nicht unterstützte Methode verwendet wird
-        w.WriteHeader(http.StatusMethodNotAllowed)
-        json.NewEncoder(w).Encode(struct {
-            Error string `json:"error"`
-        }{
-            Error: "Nicht unterstützte Methode",
-        })
+		sendErrorResponse(w, http.StatusBadRequest, "Nicht unterstützte Methode") // Senden einer Fehlermeldung, wenn eine nicht unterstützte Methode verwendet wird
     }
 }
 
@@ -70,6 +58,7 @@ func patchToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQL 
 	err = json.NewDecoder(r.Body).Decode(&updatedToDo)
 	if err != nil{
 		sendErrorResponse(w, http.StatusBadRequest, "Request Body konnte nicht decodiert werden")
+		return
 	}
 
 	// Beginn der Transaktion
@@ -185,7 +174,7 @@ func getToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt + geteste
 	// Parameter Id auslesen und prüfen
 	todoID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/todo/"), 10, 0)
 	if err != nil{
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -207,26 +196,31 @@ func getToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt + geteste
     json.NewEncoder(w).Encode(todo)
 }
 
-func GetTodosByUser(w http.ResponseWriter, r *http.Request) {
+func GetTodosByUser(w http.ResponseWriter, r *http.Request) { //! Erledigt + getestet
 	if r.Method != "GET" {
-		http.Error(w, "Nur Get Methode erlaubt", http.StatusMethodNotAllowed)
+		sendErrorResponse(w, http.StatusMethodNotAllowed, "Nur Get Methode erlaubt")
 		return
 	}
 
 	// Parameter UserID auslesen und prüfen
 	userID := strings.TrimPrefix(r.URL.Path, "/todo/user/")
 	if userID == "" {
-		http.Error(w, "UserID fehlt", http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusBadRequest, "UserID fehlt")
 		return
 	}
 
 	// Select per SQL Befehl an Datenbank
 	result, err := database.Connection.Query("SELECT id, user_id, title, description, category, `order`, created_at, updated_at, completed FROM todos WHERE user_id = ?", userID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	defer result.Close()
+
+	if !result.Next(){
+		sendErrorResponse(w, http.StatusBadRequest, "User mit dieser ID nicht vorhanden")
+		return
+	}
 
 	todos := []models.ToDo{} // Erstellen eines Slice von todos
 
@@ -235,42 +229,46 @@ func GetTodosByUser(w http.ResponseWriter, r *http.Request) {
 		var todo models.ToDo
 		err := result.Scan(&todo.ID, &todo.UserID, &todo.Title, &todo.Description, &todo.Category, &todo.Order, &todo.CreatedAt, &todo.UpdatedAt, &todo.Completed)
 		if err != nil{
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+			return
 		}
 		todos = append(todos, todo)
 	}
 
+	// Senden der Antwort
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)		// senden von Statuscode an den Client
-	json.NewEncoder(w).Encode(todos)  	// senden von der erstellten ToDo an den Client
+	w.WriteHeader(http.StatusOK)	
+	json.NewEncoder(w).Encode(todos) 
 }
 
-func createTodo(w http.ResponseWriter, r *http.Request) {
+func createTodo(w http.ResponseWriter, r *http.Request) { //! Erledigt + getestet
 
 	var newToDo models.ToDo // erstellen einer neuen ToDo Instanz
 
 	// Überprüfen ob Json in Struct ToDo umgewandelt werden kann
 	err := json.NewDecoder(r.Body).Decode(&newToDo)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	// Überprüfen ob alle Parameter enthalten
-	if newToDo.UserID == 0 {
-		http.Error(w, "UserID ist erforderlich, bitte logge dich ein", http.StatusBadRequest)
-        return
-    }
+	if newToDo.UserID == 0 || newToDo.Title == "" || newToDo.Description == ""{
+		missingFields := []string{}
+		if newToDo.UserID == 0 {
+			missingFields = append(missingFields, "UserID")
+		}
+		if newToDo.Title == ""{
+			missingFields = append(missingFields, "Titel")
+		}
+		if newToDo.Description == "" {
+			missingFields = append(missingFields, "Beschreibung")
+		}
 
-	if newToDo.Title == "" {
-		http.Error(w, "Titel ist erforderlich", http.StatusBadRequest)
-        return
-    }
-
-	if newToDo.Description == "" {
-		http.Error(w, "Beschreibung ist erforderlich", http.StatusBadRequest)
-        return
-    }
+		errorMessage := strings.Join(missingFields,", ") + " fehlt"
+		sendErrorResponse(w, http.StatusBadRequest, errorMessage)
+    	return
+	}
 
 	if newToDo.Category == "" {
 		newToDo.Category = "no category"
@@ -280,7 +278,7 @@ func createTodo(w http.ResponseWriter, r *http.Request) {
 	var maxOrderPtr *int
 	err = database.Connection.QueryRow("SELECT MAX(`order`) FROM todos WHERE user_id = ?", newToDo.UserID).Scan(&maxOrderPtr) // Wenn keine Zeile vorhanden ist gibt Max() Null zurück -> Go kann kein Null in int konventieren -> Zwischenschritt mit Pointer
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -293,26 +291,27 @@ func createTodo(w http.ResponseWriter, r *http.Request) {
 
 	newToDo.Order = maxOrder + 1
 
-	// Einfügen per SQL Befehl
+	// SQL Befehl zum Einfügen
 	result, err := database.Connection.Exec("INSERT INTO todos (user_id, title, description, category, `order`, created_at, updated_at, completed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 	newToDo.UserID, newToDo.Title, newToDo.Description, newToDo.Category, newToDo.Order, time.Now(), time.Now(), false) // -> "false", da neue ToDo nicht schon erledigt sein kann
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	// newToDo.ID auslesen für API Response (DB vergibt automatisch IDs)
 	id, err := result.LastInsertId()
 	if err != nil{
-		http.Error(w,err.Error(), http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	newToDo.ID = int(id);
 
+	// Senden der Antwort
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)	// senden von Statuscode an den Client
-	json.NewEncoder(w).Encode(newToDo)  // senden von der erstellten ToDo an den Client
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(newToDo)
 }
 
 func deleteToDoById (w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQL Transaktionen wurden benutzt! + getestet

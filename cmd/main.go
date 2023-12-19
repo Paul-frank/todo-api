@@ -21,19 +21,16 @@ func main(){
 	http.HandleFunc("/todo/user/", handlers.GetTodosByUser) 	//* GET /todo/user/{ID}: Abrufen aller ToDo-Einträge des angemeldeten Benutzers
 
 
-
-
     log.Println("Server startet auf :8080")
     log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 /*
 ToDo:
-	- Exceptions sind nicht als Json formatiert!
 	- Request http://localhost:8080/todos/user/1/100... gibt Statuscode 200 -> soll nicht sein
-	- Datenbanktransaktion (alle Operationen erfolgreich abgeschlossen sonst Rollback)
-	- Testen!!!
-	- Reihenfolge der Funktionen? Best Practise?
+	// - Exceptions sind nicht als Json formatiert!
+	//- Datenbanktransaktion (alle Operationen erfolgreich abgeschlossen sonst Rollback)
+	// - Testen!!!
 
 	//GET /todo/user/{ID}: Abrufen aller ToDo-Einträge des angemeldeten Benutzers.
 	//POST /todo: Erstellen eines neuen ToDo-Eintrags.
@@ -41,7 +38,5 @@ ToDo:
 	//PATCH /todo/{id}: Aktualisieren eines ToDo-Eintrags.
 	//DELETE /todo/{id}: Löschen eines ToDo-Eintrags.
 	//PATCH /todos/{id}/complete: Markieren eines ToDo-Eintrags als erledigt.
-	POST /todo/{id}/share: Teilen eines ToDo-Eintrags mit einem anderen Benutzer.
-
-	GET /todos/shared: Abrufen aller geteilten ToDo-Einträge.  -> Kategorie shared
+	POST /todo/{id}/share: Teilen eines ToDo-Eintrags mit einem anderen Benutzer -> Kategorie shared
 */
