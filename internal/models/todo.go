@@ -14,4 +14,6 @@ type ToDo struct {
 	CreatedAt 	time.Time 	`json:"created_at"`		// Erstellungsdatum
 	UpdatedAt 	time.Time 	`json:"updated_at"`		// Datum der letzten Änderung
 	Completed 	bool 		`json:"completed"`		// Status ob Todo erledigt
+	OriginalID	int  		`json:"original_id"`	// Original ID der ToDo falls es sich um eine Kopie handelt
+
 }
