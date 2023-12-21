@@ -27,10 +27,11 @@ func main(){
 
 /*
 ToDo:
-	- Request http://localhost:8080/todos/user/1/100... gibt Statuscode 200 -> soll nicht sein
-	- patchtodoByID - Fehler wenn original_todo_id auf eine gelöschte todo verweist
+	- Dokumentation erstellen
+	//- UpdateToDoStatus - Fehler wenn original_todo_id auf eine gelöschte todo verweist
+	// Request http://localhost:8080/todos/user/1/100... gibt Statuscode 200 -> soll nicht sein
 	// Exceptions sind nicht als Json formatiert!
-	// Datenbanktransaktion (alle Operationen erfolgreich abgeschlossen sonst Rollback)
+	// Datenbanktransaktion einführen (alle Operationen erfolgreich abgeschlossen sonst Rollback)
 
 	//GET /todo/user/{ID}: Abrufen aller ToDo-Einträge des angemeldeten Benutzers.
 	//POST /todo: Erstellen eines neuen ToDo-Eintrags.

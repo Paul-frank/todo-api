@@ -44,7 +44,8 @@ func ToDoParameterHandler(w http.ResponseWriter, r *http.Request){
     }
 }
 
-func patchToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQL Transaktionen wurden benutzt! + getestet
+
+func patchToDoById(w http.ResponseWriter, r *http.Request){
 
 	// Parameter Id auslesen und prüfen
 	todoID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/todo/"), 10, 0)
@@ -52,6 +53,13 @@ func patchToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQL 
 		sendErrorResponse(w, http.StatusBadRequest, "Ungültige todo_id")
 		return
 	}
+
+	// Secret Key aus dem Header auslesen
+    secretKey := r.Header.Get("Secret-Key")
+    if secretKey == "" {
+        sendErrorResponse(w, http.StatusBadRequest, "Secret Key fehlt")
+        return
+    }
 
 	// Umwandeln in neue Todo Instanz
 	var updatedToDo models.ToDo
@@ -69,8 +77,8 @@ func patchToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQL 
 	}
 
 	// Beenden wenn geteilte ToDo
-	var currentOriginalID int
-	err = tx.QueryRow("SELECT original_todo_id FROM todos WHERE id = ?", todoID).Scan(&currentOriginalID)
+	var userID, currentOriginalID int
+	err = tx.QueryRow("SELECT user_id, original_todo_id FROM todos WHERE id = ?", todoID).Scan(&userID, &currentOriginalID)
 	if err != nil{
 		tx.Rollback()
 		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
@@ -80,6 +88,12 @@ func patchToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQL 
 		sendErrorResponse(w, http.StatusBadRequest, "Geteilte Todo kann nicht angepasst werden")
 		return
 	}
+
+	// Authentifizierung prüfen
+    if !authenticateUser(userID, secretKey) {
+        sendErrorResponse(w, http.StatusUnauthorized, "Nicht autorisiert")
+        return
+    }
 
 	// Wenn Position sich verändert, dann ...
 	if updatedToDo.Order != 0{
@@ -179,13 +193,20 @@ func patchToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQL 
     })
 }
 
-func getToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt + getestet
+func getToDoById(w http.ResponseWriter, r *http.Request){
 	// Parameter Id auslesen und prüfen
 	todoID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/todo/"), 10, 0)
 	if err != nil{
 		sendErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// Secret Key aus dem Header auslesen
+    secretKey := r.Header.Get("Secret-Key")
+    if secretKey == "" {
+        sendErrorResponse(w, http.StatusBadRequest, "Secret Key fehlt")
+        return
+    }
 
 	// SQL Select Abfrage zum einlesen und Umwandeln in eine ToDo Instanz 
 	var todo models.ToDo
@@ -199,13 +220,25 @@ func getToDoById(w http.ResponseWriter, r *http.Request){ //! Erledigt + geteste
 		return
 	}
 
+	// Authentifizierung prüfen
+    if !authenticateUser(todo.UserID, secretKey) {
+        sendErrorResponse(w, http.StatusUnauthorized, "Nicht autorisiert")
+        return
+    }
+
 	// Senden der Antwort
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(todo)
 }
 
-func createTodo(w http.ResponseWriter, r *http.Request) { //! Erledigt + getestet
+func createTodo(w http.ResponseWriter, r *http.Request) {
+	// Secret Key aus dem Header auslesen
+    secretKey := r.Header.Get("Secret-Key")
+    if secretKey == "" {
+        sendErrorResponse(w, http.StatusBadRequest, "Secret Key fehlt")
+        return
+    }
 
 	var newTodo models.ToDo // erstellen einer neuen ToDo Instanz
 
@@ -215,6 +248,25 @@ func createTodo(w http.ResponseWriter, r *http.Request) { //! Erledigt + geteste
 		sendErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+
+	// Überprüfen, ob die UserID in der User-Tabelle existiert
+	var exists bool
+	err = database.Connection.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)", newTodo.UserID).Scan(&exists)
+	if err != nil {
+		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !exists {
+		sendErrorResponse(w, http.StatusBadRequest, "UserID existiert nicht")
+		return
+	}
+
+	// Authentifizierung prüfen, sonnst kann ein fremder User für mich eine Todo erstellen
+    if !authenticateUser(newTodo.UserID, secretKey) {
+        sendErrorResponse(w, http.StatusUnauthorized, "Nicht autorisiert")
+        return
+    }
 
 	// Überprüfen ob alle Parameter enthalten
 	if newTodo.UserID == 0 || newTodo.Title == "" || newTodo.Description == ""{
@@ -256,35 +308,37 @@ func createTodo(w http.ResponseWriter, r *http.Request) { //! Erledigt + geteste
 	newTodo.Order = maxOrder + 1
 
 	// SQL Befehl zum Einfügen
-	result, err := database.Connection.Exec("INSERT INTO todos (user_id, title, description, category, `order`, created_at, updated_at, completed, original_todo_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+	_ , err = database.Connection.Exec("INSERT INTO todos (user_id, title, description, category, `order`, created_at, updated_at, completed, original_todo_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 	newTodo.UserID, newTodo.Title, newTodo.Description, newTodo.Category, newTodo.Order, time.Now(), time.Now(), false, 0) // -> "false", da neue ToDo nicht schon erledigt sein kann
 	if err != nil {
 		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// newToDo.ID auslesen für API Response (DB vergibt automatisch IDs)
-	id, err := result.LastInsertId()
-	if err != nil{
-		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	newTodo.ID = int(id);
-
 	// Senden der Antwort
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(newTodo)
+	json.NewEncoder(w).Encode(struct {
+        Message string `json:"message"`
+    }{
+        Message: "ToDo erfolgreich erstellt",
+    })
 }
 
-func deleteToDoById (w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQL Transaktionen wurden benutzt! + getestet
+func deleteToDoById (w http.ResponseWriter, r *http.Request){
 	// Parameter Id auslesen und prüfen
 	todoID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/todo/"), 10, 0)
 	if err != nil{
 		sendErrorResponse(w, http.StatusBadRequest, "Ungültige todo_id")
 		return
 	}
+
+    // Secret Key aus dem Header auslesen
+    secretKey := r.Header.Get("Secret-Key")
+    if secretKey == "" {
+        sendErrorResponse(w, http.StatusBadRequest, "Secret Key fehlt")
+        return
+    }
 
 	// Beginn der Transaktion
 	tx, err := database.Connection.Begin()
@@ -293,9 +347,8 @@ func deleteToDoById (w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQ
 		return
 	}
 
-	// Anpassen der Position (order)
+	// Prüfen ob todoID vorhand und userID auslesen
 	var currentOrder, userID int
-
 	err = tx.QueryRow("SELECT `order`, user_id FROM todos WHERE id = ?", todoID).Scan(&currentOrder, &userID) // Position (order) und userID auslesen
 	if err != nil{
 		tx.Rollback()
@@ -303,6 +356,13 @@ func deleteToDoById (w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQ
 		return
 	}
 
+	// Authentifizierung prüfen
+    if !authenticateUser(int(userID), secretKey) {
+        sendErrorResponse(w, http.StatusUnauthorized, "Nicht autorisiert")
+        return
+    }
+
+	// Anpassen der Position (order)
 	_, err = tx.Exec("UPDATE todos SET `order` = `order` - 1 WHERE `order` > ? AND user_id = ?", currentOrder, userID) // Positionen (order) der anderen ToDos anpassen 
     if err != nil {
 		tx.Rollback()
@@ -335,18 +395,43 @@ func deleteToDoById (w http.ResponseWriter, r *http.Request){ //! Erledigt -> SQ
     })
 }
 
-func GetTodosByUser(w http.ResponseWriter, r *http.Request) { //! Erledigt + getestet
+func GetTodosByUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		sendErrorResponse(w, http.StatusMethodNotAllowed, "Nur Get Methode erlaubt")
 		return
 	}
 
-	// Parameter UserID auslesen und prüfen
-	userID := strings.TrimPrefix(r.URL.Path, "/todo/user/")
-	if userID == "" {
-		sendErrorResponse(w, http.StatusBadRequest, "UserID fehlt")
+    // UserID auslesen
+	userID, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/todo/user/"), 10, 0)
+	if err != nil{
+		sendErrorResponse(w, http.StatusBadRequest, "Ungültige userID")
 		return
 	}
+	
+	// Secret Key aus dem Header auslesen
+    secretKey := r.Header.Get("Secret-Key")
+    if secretKey == "" {
+        sendErrorResponse(w, http.StatusBadRequest, "Secret Key fehlt")
+        return
+    }
+
+	// Authentifizierung prüfen
+    if !authenticateUser(int(userID), secretKey) {
+        sendErrorResponse(w, http.StatusUnauthorized, "Nicht autorisiert")
+        return
+    }
+
+	// Überprüfen, ob die UserID existiert
+    var exists bool
+    err = database.Connection.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)", userID).Scan(&exists)
+    if err != nil {
+        sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+        return
+    }
+    if !exists {
+        sendErrorResponse(w, http.StatusBadRequest, "User mit dieser ID nicht vorhanden")
+        return
+    }
 
 	// Select per SQL Befehl an Datenbank
 	result, err := database.Connection.Query("SELECT id, user_id, title, description, category, `order`, created_at, updated_at, completed, original_todo_id FROM todos WHERE user_id = ?", userID)
@@ -356,12 +441,8 @@ func GetTodosByUser(w http.ResponseWriter, r *http.Request) { //! Erledigt + get
 	}
 	defer result.Close()
 
-	if !result.Next(){
-		sendErrorResponse(w, http.StatusBadRequest, "User mit dieser ID nicht vorhanden")
-		return
-	}
-
-	todos := []models.ToDo{} // Erstellen eines Slice von todos
+	// Erstellen eines Slice von todos
+	todos := []models.ToDo{} 
 
 	// Jede SQL Zeile in todo umwandeln und an das Slice todos anfügen
 	for result.Next(){
@@ -388,7 +469,6 @@ func ShareToDoByID (w http.ResponseWriter, r *http.Request) {
 
 	// Parameter auslesen und prüfen
 	pathSegments := strings.Split(r.URL.Path, "/") // teilt den Path in seine Bestandteile
-
 	if len(pathSegments) < 5{
 		sendErrorResponse(w, http.StatusBadRequest, "Fehlende Parameter")
 		return
@@ -406,11 +486,30 @@ func ShareToDoByID (w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Secret Key aus dem Header auslesen
+    secretKey := r.Header.Get("Secret-Key")
+    if secretKey == "" {
+        sendErrorResponse(w, http.StatusBadRequest, "Secret Key fehlt")
+        return
+    }
+
+	// Authentifizierung prüfen für die ursprüngliche ToDo
+    var originalUser int
+    err = database.Connection.QueryRow("SELECT user_id FROM todos WHERE id = ?", todoID).Scan(&originalUser)
+    if err != nil {
+        sendErrorResponse(w, http.StatusInternalServerError, err.Error())
+        return
+    }
+    if !authenticateUser(originalUser, secretKey) {
+        sendErrorResponse(w, http.StatusUnauthorized, "Nicht autorisiert")
+        return
+    }
+
 	// Prüfen ob todoID vorhanden ist und Todo einlesen
-	var todo models.ToDo
-	err = database.Connection.QueryRow("SELECT id, user_id, title, description, category, `order`, created_at, updated_at, completed FROM todos WHERE id = ?", todoID).Scan(&todo.ID, &todo.UserID, &todo.Title, &todo.Description, &todo.Category, &todo.Order, &todo.CreatedAt, &todo.UpdatedAt, &todo.Completed)
-	if err != nil{
-		if err == sql.ErrNoRows{
+	var originalTodo models.ToDo
+	err = database.Connection.QueryRow("SELECT title, description, category, completed FROM todos WHERE id = ?", todoID).Scan(&originalTodo.Title, &originalTodo.Description, &originalTodo.Category, &originalTodo.Completed)
+	if err != nil {
+		if err == sql.ErrNoRows {
 			sendErrorResponse(w, http.StatusBadRequest, "Ungültige TodoID")
 			return
 		}
@@ -418,9 +517,9 @@ func ShareToDoByID (w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prüfen ob userID vorhanden ist --> ich hab keine User Tabelle deshalb die Daten aus den todos
+	// Prüfen ob userID vorhanden ist 
 	var userExists bool
-	err = database.Connection.QueryRow("SELECT EXISTS(SELECT 1 FROM todos WHERE user_id = ?)", userID).Scan(&userExists)
+	err = database.Connection.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)", userID).Scan(&userExists)
 	if err != nil {
 		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
@@ -433,7 +532,7 @@ func ShareToDoByID (w http.ResponseWriter, r *http.Request) {
 
 	// Ermitteln der Order für die UserID
 	var maxOrderPtr *int
-	err = database.Connection.QueryRow("SELECT MAX(`order`) FROM todos WHERE user_id = ?", todo.UserID).Scan(&maxOrderPtr) // Wenn keine Zeile vorhanden ist gibt Max() Null zurück -> Go kann kein Null in int konventieren -> Zwischenschritt mit Pointer
+	err = database.Connection.QueryRow("SELECT MAX(`order`) FROM todos WHERE user_id = ?", userID).Scan(&maxOrderPtr) // Wenn keine Zeile vorhanden ist gibt Max() Null zurück -> Go kann kein Null in int konventieren -> Zwischenschritt mit Pointer
 	if err != nil {
 		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
@@ -446,13 +545,19 @@ func ShareToDoByID (w http.ResponseWriter, r *http.Request) {
 		maxOrder = 0 // 0 wenn der User noch keine ToDos hat
 	}
 
-	todo.Order = maxOrder + 1
-	todo.Category = "shared"
-	todo.OriginalID = int(todoID)
+	// Erstellen der neuen Todo
+	var newTodo models.ToDo
+	newTodo.UserID = int(userID)
+	newTodo.Title = originalTodo.Title
+	newTodo.Description = originalTodo.Description
+	newTodo.Category = "shared"
+	newTodo.Order = maxOrder + 1
+	newTodo.Completed = originalTodo.Completed
+	newTodo.OriginalID = int(todoID)
 
 	// SQL Befehl zum Einfügen
 	_ , err = database.Connection.Exec("INSERT INTO todos (user_id, title, description, category, `order`, created_at, updated_at, completed, original_todo_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-	todo.UserID, todo.Title, todo.Description, todo.Category, todo.Order, time.Now(), time.Now(), todo.Completed, todo.OriginalID) // -> "false", da neue ToDo nicht schon erledigt sein kann
+	newTodo.UserID, newTodo.Title, newTodo.Description, newTodo.Category, newTodo.Order, time.Now(), time.Now(), newTodo.Completed, newTodo.OriginalID) // -> "false", da neue ToDo nicht schon erledigt sein kann
 	if err != nil {
 		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
@@ -474,23 +579,29 @@ func UpdateToDoStatus(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+	// Parameter auslesen und prüfen
 	pathSegments := strings.Split(r.URL.Path, "/")
     if len(pathSegments) < 4 {
-        sendErrorResponse(w, http.StatusBadRequest, "Fehlende Parameter")
+        sendErrorResponse(w, http.StatusBadRequest, "Fehlende TodoID")
         return
     }
 
-    // Die todo_id befindet sich im vierten Segment des Pfades
     todoID, err := strconv.ParseInt(pathSegments[3], 10, 0)
     if err != nil {
-
         sendErrorResponse(w, http.StatusBadRequest, "Ungültige TodoID")
         return
     }
 
+	// Secret Key aus dem Header auslesen
+    secretKey := r.Header.Get("Secret-Key")
+    if secretKey == "" {
+        sendErrorResponse(w, http.StatusBadRequest, "Secret Key fehlt")
+        return
+    }
+
 	// Request Body auslesen
-	var updatedToDo models.ToDo
-	err = json.NewDecoder(r.Body).Decode(&updatedToDo)
+	var updatedTodo models.ToDo
+	err = json.NewDecoder(r.Body).Decode(&updatedTodo)
 	if err != nil {
 		sendErrorResponse(w, http.StatusBadRequest, "Request Body konnte nicht decodiert werden")
 		return
@@ -502,39 +613,51 @@ func UpdateToDoStatus(w http.ResponseWriter, r *http.Request) {
 		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
 	
-	// Abrufen der original_todo_id
-	var originalTodoID int
-	err = tx.QueryRow("SELECT original_todo_id FROM todos WHERE id = ?", todoID).Scan(&originalTodoID)
+	// Abrufen der userID und der original_todo_id
+	var userID, originalTodoID int
+	err = tx.QueryRow("SELECT user_id, original_todo_id FROM todos WHERE id = ?", todoID).Scan(&userID, &originalTodoID)
 	if err != nil {
 		tx.Rollback()
 		sendErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+    // Authentifizierung prüfen
+    if !authenticateUser(userID, secretKey) {
+        tx.Rollback()
+        sendErrorResponse(w, http.StatusUnauthorized, "Nicht autorisiert")
+        return
+    }
+
     // Update-Logik
     if originalTodoID == 0 { // Aktuelles ToDo ist das Original
         // Aktualisieren des Originals und aller verknüpften ToDos
-        if _, err = tx.Exec("UPDATE todos SET completed = ? WHERE id = ? OR original_todo_id = ?", updatedToDo.Completed, todoID, todoID); err != nil {
+        if _, err = tx.Exec("UPDATE todos SET completed = ? WHERE id = ? OR original_todo_id = ?", updatedTodo.Completed, todoID, todoID); err != nil {
             tx.Rollback()
             sendErrorResponse(w, http.StatusInternalServerError, err.Error())
             return
         }
     } else { // Aktuelles ToDo ist eine Kopie
         // Aktualisieren nur des Original-ToDos
-        if _, err = tx.Exec("UPDATE todos SET completed = ? WHERE id = ?", updatedToDo.Completed, originalTodoID); err != nil {
+        if _, err = tx.Exec("UPDATE todos SET completed = ? WHERE id = ?", updatedTodo.Completed, originalTodoID); err != nil {
             tx.Rollback()
             sendErrorResponse(w, http.StatusInternalServerError, err.Error())
             return
         }
         // Zusätzlich Aktualisieren aller verknüpften ToDos
-        if _, err = tx.Exec("UPDATE todos SET completed = ? WHERE original_todo_id = ?", updatedToDo.Completed, originalTodoID); err != nil {
+        if _, err = tx.Exec("UPDATE todos SET completed = ? WHERE original_todo_id = ?", updatedTodo.Completed, originalTodoID); err != nil {
             tx.Rollback()
             sendErrorResponse(w, http.StatusInternalServerError, err.Error())
             return
         }
     }
+		/*
+		Nicht behandelte Edge Cases:
+			- Ich kann Todos mit mir selbst teilen
+			- Wenn Todo auf eine gelöschte Origanl Todo verweist -> was dann? -> kein Fehler -> der Status der geteilten Todo verändert sich 
+			- Wenn eine Todo geteilt wird und die geteilte Todo wieder geteilt wird -> was dann? -> Nur eine Anpassung der angesprochenen Todo und derer original Todo, die urpsüngliche Todo bleibt unverändert bis zu den Zeitpunkt wo Sie oder die geteilte Version angesprochen werden
+		*/
 
 	// Commit der Transaktion
 	if err := tx.Commit(); err != nil {
@@ -564,4 +687,16 @@ func sendErrorResponse (w http.ResponseWriter, statusCode int, errorMessage stri
 		Statuscode: statusCode,
 		Error: errorMessage,
 	})
+}
+
+func authenticateUser(userID int, secretKey string) bool {
+
+    // Logik zum Überprüfen der Authentifizierung
+    var storedSecretKey string
+    err := database.Connection.QueryRow("SELECT secret_key FROM users WHERE id = ?", userID).Scan(&storedSecretKey)
+    if err != nil {
+        return false
+    }
+
+    return secretKey == storedSecretKey
 }
